@@ -1,0 +1,316 @@
+// Estação Metereológica - Versao 05/11/2023
+
+// Credenciais do Blynk 
+#define BLYNK_TEMPLATE_ID "TMPL22QlKLyBo"
+#define BLYNK_TEMPLATE_NAME "Teste Projeto"
+#define BLYNK_AUTH_TOKEN "Q0MoTK2eWkS_XBW7CA0sroR3phDFanAe"
+#define BLYNK_PRINT Serial
+char auth[] = BLYNK_AUTH_TOKEN;
+
+// Inclui bibliotecas
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+#include <Wire.h>
+#include <Adafruit_BMP280.h>
+#include <BH1750.h>
+#include <DHT.h>
+#include <AS5600.h>
+#include <Servo.h>
+
+Servo servoMotor; // Objeto Servo para controlar o servo motor
+int servoPin = 9; // Pino para o servo motor
+
+
+//Configuracao do Wi-Fi
+//#define WIFI_SSID           "FARMBOT"    
+//#define WIFI_PASS           "Farm#Uni2018"
+//#define WIFI_SSID         "Darth Vader"    
+//#define WIFI_PASS         "bololeta11"
+#define WIFI_SSID         "Thepeter"    
+#define WIFI_PASS         "brenogabriel"
+
+//Define do pino do ESP para o sensor DHT11 (Umidade)
+#define DHT_DATA_PIN 32
+#define DHTTYPE DHT11
+DHT dht(DHT_DATA_PIN, DHTTYPE);
+
+// Define o pino do encoder (Velocidade)
+#define EncPIN 35
+
+Servo servoMotor; // Objeto Servo para controlar o servo motor
+int servoPin = 9; // Pino para o servo motor
+
+// Sensor de pressao e temperatura
+Adafruit_BMP280 bmp;
+
+// Sensor de luminosidade
+BH1750 lightMeter;
+
+// Sensor de direcao do vento (Efeito Hall)
+AS5600 as5600; 
+
+// Define os objetos timer para acionar as interrupções
+BlynkTimer  TimerLeituras; // Define o intervalo entre leituras
+BlynkTimer  TimerEncoder; // Define intervalo para ler contador
+
+// Define a variável para armazenar o intervalo de amostragem (em milisegundos)
+int IntLeituras = 5000; // Faz uma leitura dos sensores a cada 5 segundos
+int IntEncoder = 2000; // Faz a totalizacao dos pulsos a cada 2 segundos
+
+// Define as variáveis para armazenar os valores lidos
+int umidade_media = 0;
+int luminosidade_media = 0;
+int Pressao = 0;
+float temperatura_media = 0.0;
+int Velocidade = 0;
+int Rotacao = 0;
+float Direcao = 0;
+
+// Strings que contém o texto indicativo de direção
+String getDirecao(double Direcao) {
+  char *direcoes[] = {"N", "NE", "L", "SE", "S", "SO", "O", "NO"};
+  int numDirecoes = sizeof(direcoes) / sizeof(direcoes[0]);
+  double setor = 360.0 / numDirecoes;
+  int index = int((Direcao + setor / 2) / setor) % numDirecoes;
+  return direcoes[index];
+}
+
+// Variável para ler o status do encoder
+bool EncSt = LOW;
+bool EncAnt = LOW;
+
+// Variável para armazenar a contagem de pulsos
+int Cont = 0;
+
+// TESTANDO
+#include <HTTPClient.h>
+HTTPClient http;
+
+#include <ArduinoJson.h>
+
+void sendSensorDataToServer() {
+  // Crie um objeto JSON para armazenar os dados
+  DynamicJsonDocument jsonDocument(256); // Tamanho do documento JSON
+
+  // Adicione os dados ao objeto JSON
+  jsonDocument["Temperatura"] = temperatura_media;
+  jsonDocument["Umidade"] = umidade_media;
+  jsonDocument["Luminosidade"] = luminosidade_media;
+  jsonDocument["Pressao"] = Pressao;
+  jsonDocument["Direcao"] = Direcao;
+  jsonDocument["Rotacao"] = Rotacao;
+
+  // Serializa o objeto JSON para uma string
+  String jsonStr;
+  serializeJson(jsonDocument, jsonStr);
+
+  // Faça a solicitação HTTP POST para o servidor Flask
+  String url = "http://192.168.15.14:5000/data"; // URL do seu servidor Flask
+  String response;
+
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+
+  int httpCode = http.POST(jsonStr);
+
+  if (httpCode > 0) {
+    response = http.getString();
+    Serial.println("Resposta do servidor:");
+    Serial.println(response);
+  } else {
+    Serial.print("Falha na solicitação HTTP. Código de status: ");
+    Serial.println(httpCode);
+  }
+
+  http.end();
+}
+
+// FIM TESTE
+
+void setup() {
+  Serial.begin(115200); // Inicia a comunicação serial com uma taxa de transmissão de 115200 bps (bits por segundo).
+  Wire.begin(); // Inicia a comunicação I2C. O I2C é um barramento de comunicação que permite que dispositivos se comuniquem entre si. Neste caso, provavelmente é usado para se comunicar com sensores I2C, como o BMP280 e o BH1750.
+
+  // Configura o pino do encoder como entrada
+  pinMode(EncPIN, INPUT); // Este pino é provavelmente usado para ler os pulsos do encoder. A configuração como entrada permite que o Arduino leia o estado lógico no pino, que muda conforme o encoder gira.
+  // Configura a interrupção para ser acionada a cada intervalo de amostragem
+  TimerLeituras.setInterval(1000, runLeituraTemperatura);
+  TimerLeituras.setInterval(5000, run_leitura_media_temperatura);
+  TimerLeituras.setInterval(10000, runLeituraUmidade);
+  TimerLeituras.setInterval(60000, run_leitura_media_umidade);
+  TimerLeituras.setInterval(10000, runLeituraLuminosidade);
+  TimerLeituras.setInterval(60000, run_leitura_media_luminosidade);  
+  TimerLeituras.setInterval(IntLeituras, runLeituraPressao);  
+  TimerLeituras.setInterval(IntLeituras, runLeituraDirecao);  
+  TimerLeituras.setInterval(IntLeituras, runLeituraRotacao);
+  TimerLeituras.setInterval(10000, sendSensorDataToServer);
+
+  TimerEncoder.setInterval(IntEncoder, ContaPulsos); // Essas linhas configuram os temporizadores Blynk. TimerLeituras é usado para agendar a função RunLeituras para ser executada a cada IntLeituras milissegundos. TimerEncoder agendará a função ContaPulsos para ser executada a cada IntEncoder milissegundos. Isso permite que você execute essas funções em intervalos regulares.
+
+  // Set WIFI module to STA mode
+  WiFi.mode(WIFI_STA); // sta linha define o módulo Wi-Fi do ESP32 para o modo estação (STA). No modo STA, o ESP32 se conecta a uma rede Wi-Fi existente como um cliente.
+
+  Serial.printf("[WIFI] Connecting to %s ", WIFI_SSID);  
+
+  // Tenta conectar ao Wi-Fi e repete tentativa a cada 5 segundos
+  while (WiFi.status() != WL_CONNECTED) {
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    // Serial.print(".");
+    delay(5000);
+  }
+
+  // Inicia DHT11
+  dht.begin(); // Umidade
+
+  // Inicia BH1750
+  lightMeter.begin(); // Luminosidade
+
+  // Inicia BMP280
+  bmp.begin(0x76); // Pressão
+
+  // Inicia AS5600
+  as5600.begin(4);  //  Direção do Vento
+  as5600.setDirection(AS5600_CLOCK_WISE);  // default, just be explicit.
+
+  // Mensagem de conexão do Blynk
+  Blynk.begin(auth,WIFI_SSID,WIFI_PASS); // Esta chamada estabelece a conexão com o servidor Blynk, permitindo o envio e recebimento de dados entre o Arduino e o aplicativo Blynk.
+
+  
+}
+
+void loop() {
+  // Executa as tarefas programadas pelo timer
+  TimerLeituras.run();
+  TimerEncoder.run();
+  // São chamadas para verificar se é hora de executar as funções RunLeituras e ContaPulsos, respectivamente, com base nos temporizadores configurados anteriormente.
+  Blynk.run(); // Usado para permitir que o serviço Blynk execute suas tarefas e atualize as informações no aplicativo Blynk.
+
+  // Realiza a contagem de pulsos 
+  EncSt = digitalRead(EncPIN);
+  if (EncSt == HIGH && EncAnt == LOW) {
+    Cont++;
+    EncAnt = HIGH;
+  }
+  if (EncSt == LOW && EncAnt == HIGH) {
+    EncAnt = LOW;
+  }
+  // sendSensorDataToServer();
+}
+
+template <typename T>
+void add_to_samples(T value, T array[], int& current_index, int max_size) {
+  array[current_index] = value;
+  current_index = (current_index + 1) % max_size;
+}
+
+template <typename T>
+T calcula_media(T array[], int size) {
+  T peso_total = 0;
+  T media_ponderada = 0;
+
+  for(int i = 0;i < size;i++) {
+    T peso = static_cast<T>(i) + static_cast<T>(0.5);
+    media_ponderada += array[i] * peso;
+    peso_total += peso;
+  }
+  media_ponderada /= peso_total;
+  return media_ponderada;
+}
+
+// TEMPERATURA
+ 
+int index_temp = 0;
+
+void runLeituraTemperatura() {
+  float temp = bmp.readTemperature(); // Leitura da temperatura
+  add_to_samples(temp, array_temp, index_temp, 5);
+}
+
+servoMotor.attach(servoPin); // Inicializa o servo motor no pino 9
+void run_leitura_media_temperatura() {
+  float temperatura_media = calcula_media(array_temp, 5);
+  if (temperatura_media > 35) {
+    // Se a temperatura média for maior que 35 graus Celsius, gire o servo motor em 720 graus
+    servoMotor.write(180); // 180 graus para a primeira volta
+    servoMotor.write(0); // 0 graus para a segunda volta
+    delay(1000); // Aguarda 1 segundo
+  } //else{
+    //servoMotor.write(-180);
+    //servoMotorM
+    //}
+  Blynk.virtualWrite(V0, temperatura_media); // Envie a média para o Blynk
+  Serial.print("Média de Temperatura: ");
+  Serial.print(temperatura_media);
+  Serial.println(" ºC");
+  // sendDataToServer("Temperatura: ", temperatura_media)
+}
+
+// UMIDADE
+float array_umid[10];
+int index_umid = 0;
+void runLeituraUmidade() {
+  float umidade = dht.readHumidity();
+  Serial.print("Umidade -> ");
+  Serial.println(umidade);
+  add_to_samples(umidade, array_umid, index_umid, 10);
+}
+
+void run_leitura_media_umidade() {
+  float umidade_media = calcula_media(array_umid, 10);
+  Blynk.virtualWrite(V1, umidade_media);
+  Serial.print("Umidade: ");
+  Serial.print(umidade_media);
+  Serial.println(" % " );
+}
+
+// LUMINOSIDADE
+float array_lx[10];
+int index_lx = 0;
+void runLeituraLuminosidade() {
+  float lx = lightMeter.readLightLevel();
+  Serial.print("Luminosidade -> ");
+  Serial.println(lx);
+  add_to_samples(lx, array_lx, index_lx, 10);
+}
+
+void run_leitura_media_luminosidade() {
+  float luminosidade_media = calcula_media(array_lx, 10);
+  if (luminosidade_media < 10) {
+    Blynk.virtualWrite(V2, HIGH);
+  } else {
+    Blynk.virtualWrite(V2, LOW);
+  }
+  Serial.print("Luminosidade: ");
+  Serial.print(int(luminosidade_media));
+  Serial.println(" lux  "); 
+}
+
+void runLeituraPressao() {
+  Pressao = bmp.readPressure()/100;
+  // Blynk.virtualWrite(V3, Pressao);
+  // Serial.print("Pressão: ");
+  // Serial.print(Pressao);
+  // Serial.println(" hPa " );
+}
+
+void runLeituraDirecao() {
+  Direcao = abs((as5600.rawAngle()*360.0/4095.0));
+  Blynk.virtualWrite(V4, getDirecao(Direcao));
+  // Serial.print("Direcao: ");
+  // Serial.print(Direcao);
+  // Serial.println(" graus  "); 
+}
+
+void runLeituraRotacao() {
+  Blynk.virtualWrite(V5, Rotacao);
+  // Serial.print("Rotacao: ");
+  // Serial.print(Rotacao);
+  // Serial.println(" rpm  "); 
+}
+
+// Rotina para integralizar os pulsos e converter para rpm
+void ContaPulsos() {
+  Rotacao = ((Cont * 6) ) * 1000.00 / IntEncoder;
+  Cont = 0;    
+}
